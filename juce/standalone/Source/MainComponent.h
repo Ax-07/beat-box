@@ -174,6 +174,12 @@ private:
     juce::Slider masterSlider;
     juce::Label masterLabel;
 
+    // Sélecteur de drum
+    juce::TextButton kickSelectButton { "KICK" };
+    juce::TextButton snareSelectButton { "SNARE" };
+    juce::TextButton hatSelectButton { "HAT" };
+    int selectedDrum = 0; // 0=Kick, 1=Snare, 2=Hat
+
     juce::GroupComponent kickGroup, snareGroup, hatGroup;
     juce::Slider kickDecay, kickAttack, kickBase;
     juce::Slider snareDecay, snareTone, snareNoiseMix;

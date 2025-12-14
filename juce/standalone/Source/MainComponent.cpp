@@ -59,6 +59,40 @@ MainComponent::MainComponent()
     };
     addAndMakeVisible(masterSlider);
 
+    // Boutons de sélection de drum
+    addAndMakeVisible(kickSelectButton);
+    addAndMakeVisible(snareSelectButton);
+    addAndMakeVisible(hatSelectButton);
+    
+    kickSelectButton.onClick = [this] {
+        selectedDrum = 0;
+        kickSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xffff4444));
+        snareSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff3a3a3a));
+        hatSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff3a3a3a));
+        resized();
+    };
+    
+    snareSelectButton.onClick = [this] {
+        selectedDrum = 1;
+        kickSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff3a3a3a));
+        snareSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff44ff44));
+        hatSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff3a3a3a));
+        resized();
+    };
+    
+    hatSelectButton.onClick = [this] {
+        selectedDrum = 2;
+        kickSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff3a3a3a));
+        snareSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff3a3a3a));
+        hatSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff4444ff));
+        resized();
+    };
+    
+    // État initial: Kick sélectionné
+    kickSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xffff4444));
+    snareSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff3a3a3a));
+    hatSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff3a3a3a));
+
     // Groups
     kickGroup.setText("Kick"); addAndMakeVisible(kickGroup);
     snareGroup.setText("Snare"); addAndMakeVisible(snareGroup);
@@ -242,11 +276,13 @@ void MainComponent::paint (juce::Graphics& g)
 
     // Labels des lanes (à gauche de la grille)
     auto area = getLocalBounds().reduced(16);
-    area.removeFromTop(85);
-    area.removeFromBottom(150);
+    area.removeFromTop(75);  // Transport
+    area.removeFromBottom(10); // Marge du bas
     
-    const int rowH = (area.getHeight() - 20) / kLanes;
-    auto gridY = area.getY() + 10;
+    // On calcule où commence la grille (après les contrôles drums)
+    auto gridStartY = area.getY() + 180 + 10; // hauteur drums + marge
+    
+    const int rowH = (area.getHeight() - 190) / kLanes; // 180 pour drums + 10 marge
     
     g.setFont(juce::Font(16.0f, juce::Font::bold));
     const char* laneNames[] = {"KICK", "SNARE", "HAT"};
@@ -259,7 +295,7 @@ void MainComponent::paint (juce::Graphics& g)
     for (int lane = 0; lane < kLanes; ++lane)
     {
         g.setColour(laneColors[lane]);
-        int y = gridY + lane * rowH;
+        int y = gridStartY + lane * rowH;
         g.drawText(laneNames[lane], 24, y, 80, rowH - 10, juce::Justification::centredLeft);
         
         // Ligne de séparation subtile
@@ -274,8 +310,9 @@ void MainComponent::paint (juce::Graphics& g)
     g.setColour(juce::Colour(0xff666666));
     g.setFont(11.0f);
     auto gridArea = getLocalBounds().reduced(16);
-    gridArea.removeFromTop(85);
-    gridArea.removeFromBottom(150);
+    gridArea.removeFromTop(75);  // Transport
+    gridArea.removeFromTop(180); // Drums
+    gridArea.removeFromTop(10);  // Marge
     gridArea.removeFromLeft(110);
     const int cellW = gridArea.getWidth() / kSteps;
     
@@ -308,41 +345,88 @@ void MainComponent::resized()
     masterLabel.setBounds(masterArea.removeFromLeft(60).reduced(4, 12));
     masterSlider.setBounds(masterArea.reduced(4, 12));
 
-    // === BOTTOM : Contrôles des instruments (horizontal) ===
-    auto bottomControls = area.removeFromBottom(140);
+    // === MILIEU : Contrôles des instruments (un seul affiché) ===
+    auto drumControls = area.removeFromTop(180);
     
-    // Largeur égale pour chaque instrument
-    const int instrumentWidth = bottomControls.getWidth() / 3;
+    // Boutons de sélection en haut de la zone de contrôle
+    auto selectorBar = drumControls.removeFromTop(45);
+    const int btnWidth = 120;
+    const int spacing = 10;
     
-    // Kick (gauche)
-    auto kickArea = bottomControls.removeFromLeft(instrumentWidth).reduced(8, 4);
-    kickGroup.setBounds(kickArea);
-    auto kickInner = kickArea.reduced(12, 26);
-    kickDecay.setBounds(kickInner.removeFromTop(30));
-    kickInner.removeFromTop(6);
-    kickAttack.setBounds(kickInner.removeFromTop(30));
-    kickInner.removeFromTop(6);
-    kickBase.setBounds(kickInner.removeFromTop(30));
+    auto selectorCenter = selectorBar.withSizeKeepingCentre(btnWidth * 3 + spacing * 2, 36);
+    kickSelectButton.setBounds(selectorCenter.removeFromLeft(btnWidth));
+    selectorCenter.removeFromLeft(spacing);
+    snareSelectButton.setBounds(selectorCenter.removeFromLeft(btnWidth));
+    selectorCenter.removeFromLeft(spacing);
+    hatSelectButton.setBounds(selectorCenter);
     
-    // Snare (centre)
-    auto snareArea = bottomControls.removeFromLeft(instrumentWidth).reduced(8, 4);
-    snareGroup.setBounds(snareArea);
-    auto snareInner = snareArea.reduced(12, 26);
-    snareDecay.setBounds(snareInner.removeFromTop(30));
-    snareInner.removeFromTop(6);
-    snareTone.setBounds(snareInner.removeFromTop(30));
-    snareInner.removeFromTop(6);
-    snareNoiseMix.setBounds(snareInner.removeFromTop(30));
+    // Zone de contrôle (un seul groupe visible à la fois)
+    auto controlArea = drumControls.reduced(8, 4);
     
-    // Hat (droite)
-    auto hatArea = bottomControls.reduced(8, 4);
-    hatGroup.setBounds(hatArea);
-    auto hatInner = hatArea.reduced(12, 26);
-    hatDecay.setBounds(hatInner.removeFromTop(30));
-    hatInner.removeFromTop(6);
-    hatCutoff.setBounds(hatInner.removeFromTop(30));
+    // Masquer tous les groupes et sliders sauf celui sélectionné
+    kickGroup.setVisible(selectedDrum == 0);
+    snareGroup.setVisible(selectedDrum == 1);
+    hatGroup.setVisible(selectedDrum == 2);
+    
+    // Masquer tous les sliders
+    kickDecay.setVisible(false);
+    kickAttack.setVisible(false);
+    kickBase.setVisible(false);
+    snareDecay.setVisible(false);
+    snareTone.setVisible(false);
+    snareNoiseMix.setVisible(false);
+    hatDecay.setVisible(false);
+    hatCutoff.setVisible(false);
+    
+    if (selectedDrum == 0) // KICK
+    {
+        kickGroup.setBounds(controlArea);
+        auto inner = controlArea.reduced(12, 26);
+        const int sliderH = 35;
+        
+        kickDecay.setVisible(true);
+        kickDecay.setBounds(inner.removeFromTop(sliderH));
+        inner.removeFromTop(8);
+        
+        kickAttack.setVisible(true);
+        kickAttack.setBounds(inner.removeFromTop(sliderH));
+        inner.removeFromTop(8);
+        
+        kickBase.setVisible(true);
+        kickBase.setBounds(inner.removeFromTop(sliderH));
+    }
+    else if (selectedDrum == 1) // SNARE
+    {
+        snareGroup.setBounds(controlArea);
+        auto inner = controlArea.reduced(12, 26);
+        const int sliderH = 35;
+        
+        snareDecay.setVisible(true);
+        snareDecay.setBounds(inner.removeFromTop(sliderH));
+        inner.removeFromTop(8);
+        
+        snareTone.setVisible(true);
+        snareTone.setBounds(inner.removeFromTop(sliderH));
+        inner.removeFromTop(8);
+        
+        snareNoiseMix.setVisible(true);
+        snareNoiseMix.setBounds(inner.removeFromTop(sliderH));
+    }
+    else // HAT
+    {
+        hatGroup.setBounds(controlArea);
+        auto inner = controlArea.reduced(12, 26);
+        const int sliderH = 35;
+        
+        hatDecay.setVisible(true);
+        hatDecay.setBounds(inner.removeFromTop(sliderH));
+        inner.removeFromTop(8);
+        
+        hatCutoff.setVisible(true);
+        hatCutoff.setBounds(inner.removeFromTop(sliderH));
+    }
 
-    // === CENTRE : GRILLE SÉQUENCEUR (plus grande) ===
+    // === BAS : GRILLE SÉQUENCEUR ===
     auto gridArea = area.reduced(0, 10);
     gridArea.removeFromLeft(110); // Espace pour les labels de lanes
     
