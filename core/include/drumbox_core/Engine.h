@@ -23,6 +23,8 @@ public:
     void setPlaying(bool play);
 
     void setStep(int lane, int step, bool on, float velocity);
+    
+    void clearPattern();
 
     // rendu interleaved: out[frame*ch + c]
     void process(float* outInterleaved, int numFrames, int numChannels);
