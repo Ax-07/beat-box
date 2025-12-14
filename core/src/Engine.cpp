@@ -8,6 +8,7 @@
 
 namespace drumbox_core
 {
+    void Engine::clearPattern() { pattern_.clear(); }
 
     void Engine::prepare(double sampleRate, int maxBlockSize)
     {
@@ -20,18 +21,8 @@ namespace drumbox_core
         snare_.prepare(sampleRate_);
         hat_.prepare(sampleRate_);
 
-        pattern_.clear();
+        clearPattern(); // UI part de zéro
 
-        // Pattern demo par défaut (pour entendre tout de suite)
-        // Kick: 1 et 9
-        pattern_.setStep(0, 0, true, 1.0f);
-        pattern_.setStep(0, 8, true, 0.95f);
-        // Snare: 5 et 13
-        pattern_.setStep(1, 4, true, 1.0f);
-        pattern_.setStep(1, 12, true, 1.0f);
-        // Hat: tous les 2 steps
-        for (int i = 0; i < kSteps; i += 2)
-            pattern_.setStep(2, i, true, 0.5f);
     }
 
     void Engine::reset()
