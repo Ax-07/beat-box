@@ -115,7 +115,7 @@ MainComponent::MainComponent()
         }
     }
 
-    setSize(900, 520);
+    setSize(1100, 600);
     startTimerHz(30);
 }
 
@@ -129,7 +129,12 @@ void MainComponent::prepareToPlay (int samplesPerBlockExpected, double sampleRat
     engine.prepare(sampleRate, samplesPerBlockExpected);
     engine.clearPattern();
     engine.setBpm((float)bpmSlider.getValue());
-    engine.setPlaying(true);
+    engine.setPlaying(false);
+    playing.store(false);
+    playButton.setButtonText("Play");
+
+    lastPlayheadStep = -1;
+    updatePlayheadOutline();
 
     engine.params().masterGain.store((float)masterSlider.getValue(), std::memory_order_relaxed);
 
@@ -196,86 +201,171 @@ void MainComponent::refreshGridFromPattern()
     // Ici on laisse l’UI telle quelle.
 }
 
+void MainComponent::updatePlayheadOutline()
+{
+    const int step = engine.getStepIndex();
+    if (step == lastPlayheadStep) return;
+    lastPlayheadStep = step;
+
+    for (int lane = 0; lane < kLanes; ++lane)
+    {
+        for (int s = 0; s < kSteps; ++s)
+            grid[lane][s].setPlayhead(s == step);
+    }
+}
+
 void MainComponent::timerCallback()
 {
+    updatePlayheadOutline();
     repaint();
 }
 
 void MainComponent::paint (juce::Graphics& g)
 {
-    g.fillAll(juce::Colours::black);
+    // Background dégradé
+    auto bounds = getLocalBounds();
+    juce::ColourGradient gradient(juce::Colour(0xff1a1a1a), 0, 0,
+                                  juce::Colour(0xff0f0f0f), 0, (float)bounds.getHeight(), false);
+    g.setGradientFill(gradient);
+    g.fillAll();
 
-    g.setColour(juce::Colours::white);
-    g.setFont(18.0f);
-    g.drawText("DrumBox Standalone", 20, 10, 400, 30, juce::Justification::left);
+    // Titre principal
+    g.setColour(juce::Colour(0xffff6b35));
+    g.setFont(juce::Font(24.0f, juce::Font::bold));
+    g.drawText("DrumBox", 20, 12, 200, 40, juce::Justification::left);
 
-    // Affiche le step courant (playhead) en surbrillance
+    // Step indicator
     const int step = engine.getStepIndex();
+    g.setColour(juce::Colours::lightgrey);
     g.setFont(14.0f);
-    g.drawText("Step: " + juce::String(step + 1), 20, 40, 200, 20, juce::Justification::left);
+    g.drawText("Step: " + juce::String(step + 1) + "/16", 20, 50, 150, 20, juce::Justification::left);
+
+    // Labels des lanes (à gauche de la grille)
+    auto area = getLocalBounds().reduced(16);
+    area.removeFromTop(85);
+    area.removeFromBottom(150);
+    
+    const int rowH = (area.getHeight() - 20) / kLanes;
+    auto gridY = area.getY() + 10;
+    
+    g.setFont(juce::Font(16.0f, juce::Font::bold));
+    const char* laneNames[] = {"KICK", "SNARE", "HAT"};
+    const juce::Colour laneColors[] = {
+        juce::Colour(0xffff4444),  // Rouge pour Kick
+        juce::Colour(0xff44ff44),  // Vert pour Snare
+        juce::Colour(0xff4444ff)   // Bleu pour Hat
+    };
+    
+    for (int lane = 0; lane < kLanes; ++lane)
+    {
+        g.setColour(laneColors[lane]);
+        int y = gridY + lane * rowH;
+        g.drawText(laneNames[lane], 24, y, 80, rowH - 10, juce::Justification::centredLeft);
+        
+        // Ligne de séparation subtile
+        if (lane > 0)
+        {
+            g.setColour(juce::Colour(0xff2a2a2a));
+            g.drawLine(110.0f, (float)y, (float)(getWidth() - 20), (float)y, 1.0f);
+        }
+    }
+    
+    // Marqueurs de mesure (1, 5, 9, 13)
+    g.setColour(juce::Colour(0xff666666));
+    g.setFont(11.0f);
+    auto gridArea = getLocalBounds().reduced(16);
+    gridArea.removeFromTop(85);
+    gridArea.removeFromBottom(150);
+    gridArea.removeFromLeft(110);
+    const int cellW = gridArea.getWidth() / kSteps;
+    
+    for (int i = 0; i < kSteps; i += 4)
+    {
+        int x = gridArea.getX() + i * cellW + cellW / 2;
+        g.drawText(juce::String(i + 1), x - 15, gridArea.getY() - 20, 30, 15, juce::Justification::centred);
+    }
 }
 
 void MainComponent::resized()
 {
     auto area = getLocalBounds().reduced(16);
 
-    auto top = area.removeFromTop(70);
-    playButton.setBounds(top.removeFromLeft(120).reduced(0, 10));
-    top.removeFromLeft(12);
-    bpmLabel.setBounds(top.removeFromLeft(40).reduced(0, 10));
-    bpmSlider.setBounds(top.removeFromLeft(260).reduced(0, 10));
-    top.removeFromLeft(12);
-    masterLabel.setBounds(top.removeFromLeft(60).reduced(0, 10));
-    masterSlider.setBounds(top.removeFromLeft(220).reduced(0, 10));
+    // === TOP BAR : Transport + Master ===
+    auto topBar = area.removeFromTop(75);
+    topBar.removeFromLeft(200); // Espace pour le titre
+    
+    // Play button
+    playButton.setBounds(topBar.removeFromLeft(100).reduced(4, 12));
+    topBar.removeFromLeft(8);
+    
+    // BPM
+    bpmLabel.setBounds(topBar.removeFromLeft(50).reduced(4, 12));
+    bpmSlider.setBounds(topBar.removeFromLeft(220).reduced(4, 12));
+    topBar.removeFromLeft(20);
+    
+    // Master (à droite)
+    auto masterArea = topBar.removeFromRight(260);
+    masterLabel.setBounds(masterArea.removeFromLeft(60).reduced(4, 12));
+    masterSlider.setBounds(masterArea.reduced(4, 12));
 
-    auto controls = area.removeFromRight(320);
+    // === BOTTOM : Contrôles des instruments (horizontal) ===
+    auto bottomControls = area.removeFromBottom(140);
+    
+    // Largeur égale pour chaque instrument
+    const int instrumentWidth = bottomControls.getWidth() / 3;
+    
+    // Kick (gauche)
+    auto kickArea = bottomControls.removeFromLeft(instrumentWidth).reduced(8, 4);
+    kickGroup.setBounds(kickArea);
+    auto kickInner = kickArea.reduced(12, 26);
+    kickDecay.setBounds(kickInner.removeFromTop(30));
+    kickInner.removeFromTop(6);
+    kickAttack.setBounds(kickInner.removeFromTop(30));
+    kickInner.removeFromTop(6);
+    kickBase.setBounds(kickInner.removeFromTop(30));
+    
+    // Snare (centre)
+    auto snareArea = bottomControls.removeFromLeft(instrumentWidth).reduced(8, 4);
+    snareGroup.setBounds(snareArea);
+    auto snareInner = snareArea.reduced(12, 26);
+    snareDecay.setBounds(snareInner.removeFromTop(30));
+    snareInner.removeFromTop(6);
+    snareTone.setBounds(snareInner.removeFromTop(30));
+    snareInner.removeFromTop(6);
+    snareNoiseMix.setBounds(snareInner.removeFromTop(30));
+    
+    // Hat (droite)
+    auto hatArea = bottomControls.reduced(8, 4);
+    hatGroup.setBounds(hatArea);
+    auto hatInner = hatArea.reduced(12, 26);
+    hatDecay.setBounds(hatInner.removeFromTop(30));
+    hatInner.removeFromTop(6);
+    hatCutoff.setBounds(hatInner.removeFromTop(30));
 
-    auto groupH = 140;
-    kickGroup.setBounds(controls.removeFromTop(groupH).reduced(0, 6));
-    snareGroup.setBounds(controls.removeFromTop(groupH).reduced(0, 6));
-    hatGroup.setBounds(controls.removeFromTop(groupH).reduced(0, 6));
-
-    // sliders in groups (simple layout)
-    auto place3 = [](juce::Rectangle<int> r, juce::Slider& a, juce::Slider& b, juce::Slider& c)
-    {
-        auto row = r.reduced(12, 26);
-        auto h = 28;
-        a.setBounds(row.removeFromTop(h));
-        row.removeFromTop(10);
-        b.setBounds(row.removeFromTop(h));
-        row.removeFromTop(10);
-        c.setBounds(row.removeFromTop(h));
-    };
-
-    place3(kickGroup.getBounds(), kickDecay, kickAttack, kickBase);
-    place3(snareGroup.getBounds(), snareDecay, snareTone, snareNoiseMix);
-
-    // Hat a 2 sliders
-    {
-        auto r = hatGroup.getBounds().reduced(12, 26);
-        auto h = 28;
-        hatDecay.setBounds(r.removeFromTop(h));
-        r.removeFromTop(10);
-        hatCutoff.setBounds(r.removeFromTop(h));
-    }
-
-    // Grid
+    // === CENTRE : GRILLE SÉQUENCEUR (plus grande) ===
     auto gridArea = area.reduced(0, 10);
-    const int rowH = 50;
+    gridArea.removeFromLeft(110); // Espace pour les labels de lanes
+    
+    const int rowH = (gridArea.getHeight() - 20) / kLanes;
     const int cellW = gridArea.getWidth() / kSteps;
 
     for (int lane = 0; lane < kLanes; ++lane)
     {
         auto row = gridArea.removeFromTop(rowH);
-        auto label = row.removeFromLeft(70);
-        // pas de label component, juste texte dans paint via overlay rapide
-        // (tu peux ajouter des Label si tu veux)
-
+        
         for (int step = 0; step < kSteps; ++step)
         {
-            grid[lane][step].setBounds(row.removeFromLeft(cellW).reduced(6, 10));
+            // Plus d'espace entre les cellules
+            auto cellArea = row.removeFromLeft(cellW);
+            
+            // Espacement supplémentaire tous les 4 steps (visuellement)
+            int marginLeft = (step % 4 == 0) ? 8 : 4;
+            int marginRight = (step % 4 == 3) ? 8 : 4;
+            
+            grid[lane][step].setBounds(cellArea.reduced(marginLeft, 8)
+                                              .withTrimmedRight(marginRight - marginLeft));
         }
-
-        gridArea.removeFromTop(6);
+        
+        gridArea.removeFromTop(10);
     }
 }
