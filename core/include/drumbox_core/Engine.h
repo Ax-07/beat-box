@@ -9,6 +9,8 @@
 #include "drumbox_core/drums/HiHat.h"
 #include "drumbox_core/Params.h"
 
+#include <atomic>
+
 namespace drumbox_core {
 
 class Engine {
@@ -30,7 +32,7 @@ public:
     void process(float* outInterleaved, int numFrames, int numChannels);
 
     // lecture (pour UI plus tard)
-    int getStepIndex() const { return transport_.stepIndex; }
+    int getStepIndex() const { return playheadStep_.load(std::memory_order_relaxed); }
     float getBpm() const { return transport_.bpm; }
     bool isPlaying() const { return transport_.playing; }
 
@@ -42,6 +44,7 @@ private:
 
     Pattern pattern_{};
     Transport transport_{};
+    std::atomic<int> playheadStep_{0};
     
     Params params_{};
 
