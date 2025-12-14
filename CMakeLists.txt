@@ -1,6 +1,6 @@
 # CMakeLists.txt for DrumBox project
 cmake_minimum_required(VERSION 3.20) # Défini la version minimale de CMake requise
-project(DrumBox LANGUAGES CXX) # Défini le nom du projet et le langage utilisé
+project(DrumBox VERSION 0.1.0 LANGUAGES CXX) # Défini le nom du projet, la version et le langage utilisé
 
 set(CMAKE_CXX_STANDARD 17) # Défini la norme C++ à utiliser
 set(CMAKE_CXX_STANDARD_REQUIRED ON) # Rend la norme C++ obligatoire
@@ -23,3 +23,6 @@ add_executable(main_test
 target_link_libraries(main_test PRIVATE drumbox_core)
 
 add_subdirectory(tools/runner_miniaudio)
+add_subdirectory(third_party/JUCE)
+add_subdirectory(juce/standalone)
+
