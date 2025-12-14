@@ -95,6 +95,8 @@ namespace drumbox_core
 
         if (!transport_.playing)
             return;
+        
+        playheadStep_.store(transport_.stepIndex, std::memory_order_relaxed);
 
         const double fps = transport_.framesPerStep();
 
@@ -105,7 +107,9 @@ namespace drumbox_core
             {
                 triggerStep(transport_.stepIndex);
                 transport_.stepIndex = (transport_.stepIndex + 1) % kSteps;
+                playheadStep_.store(transport_.stepIndex, std::memory_order_relaxed);
                 transport_.nextStepFrame += fps;
+
             }
             transport_.currentFrame++;
 
