@@ -9,6 +9,10 @@
 #include "drumbox_core/drums/HiHat.h"
 #include "drumbox_core/Params.h"
 
+#include "drumbox_core/dsp/ReverbSchroeder.h"
+#include "drumbox_core/dsp/FxSection.h"
+#include "drumbox_core/dsp/MasterSection.h"
+
 #include <atomic>
 
 namespace drumbox_core {
@@ -51,6 +55,10 @@ private:
     Kick  kick_{};
     Snare snare_{};
     HiHat hat_{};
+
+    ReverbSchroeder reverb_{};
+    FxSection       fx_{};
+    MasterSection  master_{};
 };
 
 } // namespace drumbox_core
