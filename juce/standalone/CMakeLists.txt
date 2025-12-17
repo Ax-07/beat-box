@@ -8,6 +8,18 @@ target_sources(DrumBoxStandalone PRIVATE
     Source/Main.cpp
     Source/MainComponent.h
     Source/MainComponent.cpp
+    Source/components/stepButton/StepButton.h
+    Source/components/stepButton/StepButton.cpp
+    Source/components/transportBar/TransportBar.h
+    Source/components/transportBar/TransportBar.cpp
+    Source/components/drumSelector/DrumSelector.h
+    Source/components/drumSelector/DrumSelector.cpp
+    Source/components/drumControlPanel/DrumControlPanel.h
+    Source/components/drumControlPanel/DrumControlPanel.cpp
+    Source/components/sequencerGrid/SequencerGrid.h
+    Source/components/sequencerGrid/SequencerGrid.cpp
+    Source/components/DrumWavePreviewComponent/DrumWavePreviewComponent.h
+    Source/components/DrumWavePreviewComponent/DrumWavePreviewComponent.cpp
 )
 
 target_link_libraries(DrumBoxStandalone PRIVATE
