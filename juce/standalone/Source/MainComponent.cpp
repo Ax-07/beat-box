@@ -3,6 +3,8 @@
 #include "MainComponent.h"
 #include <vector>
 
+using namespace DrumBoxConstants;
+
 static const char* laneName(int lane)
 {
     switch (lane)
@@ -25,10 +27,7 @@ MainComponent::MainComponent()
         const bool newPlay = !playing.load();
         playing.store(newPlay);
 
-        Command c;
-        c.type = Command::SetPlaying;
-        c.on = newPlay;
-        queue.push(c);
+        queue.push(Command::setPlaying(newPlay));
 
         playButton.setButtonText(newPlay ? "Stop" : "Play");
     };
@@ -40,10 +39,7 @@ MainComponent::MainComponent()
     bpmSlider.setValue(120.0);
     bpmSlider.onValueChange = [this]
     {
-        Command c;
-        c.type = Command::SetBpm;
-        c.f = (float)bpmSlider.getValue();
-        queue.push(c);
+        queue.push(Command::setBpm((float)bpmSlider.getValue()));
     };
     addAndMakeVisible(bpmSlider);
 
@@ -51,11 +47,27 @@ MainComponent::MainComponent()
     masterLabel.setText("Master", juce::dontSendNotification);
     addAndMakeVisible(masterLabel);
 
-    masterSlider.setRange(0.0, 1.0, 0.001);
-    masterSlider.setValue(0.6);
+    // UI en dB (converti vers gain linéaire pour le core)
+    auto dbFromLinear = [](double lin) {
+        lin = std::max(1.0e-9, lin);
+        return 20.0 * std::log10(lin);
+    };
+    auto linearFromDb = [](double db) {
+        return std::pow(10.0, db / 20.0);
+    };
+
+    masterSlider.setRange(-60.0, 0.0, 0.1);
+    masterSlider.setValue(dbFromLinear(0.6));
+    masterSlider.textFromValueFunction = [](double v) {
+        return juce::String(v, 1) + " dB";
+    };
+    masterSlider.valueFromTextFunction = [](const juce::String& s) {
+        return (double)s.retainCharacters("0123456789.-").getDoubleValue();
+    };
     masterSlider.onValueChange = [this]
     {
-        engine.params().masterGain.store((float)masterSlider.getValue(), std::memory_order_relaxed);
+        const double lin = std::pow(10.0, masterSlider.getValue() / 20.0);
+        engine.params().masterGain.store((float)lin, std::memory_order_relaxed);
     };
     addAndMakeVisible(masterSlider);
 
@@ -66,91 +78,780 @@ MainComponent::MainComponent()
     
     kickSelectButton.onClick = [this] {
         selectedDrum = 0;
-        kickSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xffff4444));
-        snareSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff3a3a3a));
-        hatSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff3a3a3a));
+        kickSelectButton.setColour(juce::TextButton::buttonColourId, DrumBoxConstants::Colors::kick);
+        snareSelectButton.setColour(juce::TextButton::buttonColourId, DrumBoxConstants::Colors::buttonInactive);
+        hatSelectButton.setColour(juce::TextButton::buttonColourId, DrumBoxConstants::Colors::buttonInactive);
         resized();
     };
     
     snareSelectButton.onClick = [this] {
         selectedDrum = 1;
-        kickSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff3a3a3a));
-        snareSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff44ff44));
-        hatSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff3a3a3a));
+        kickSelectButton.setColour(juce::TextButton::buttonColourId, DrumBoxConstants::Colors::buttonInactive);
+        snareSelectButton.setColour(juce::TextButton::buttonColourId, DrumBoxConstants::Colors::snare);
+        hatSelectButton.setColour(juce::TextButton::buttonColourId, DrumBoxConstants::Colors::buttonInactive);
         resized();
     };
     
     hatSelectButton.onClick = [this] {
         selectedDrum = 2;
-        kickSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff3a3a3a));
-        snareSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff3a3a3a));
-        hatSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff4444ff));
+        kickSelectButton.setColour(juce::TextButton::buttonColourId, DrumBoxConstants::Colors::buttonInactive);
+        snareSelectButton.setColour(juce::TextButton::buttonColourId, DrumBoxConstants::Colors::buttonInactive);
+        hatSelectButton.setColour(juce::TextButton::buttonColourId, DrumBoxConstants::Colors::hat);
         resized();
     };
     
     // État initial: Kick sélectionné
-    kickSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xffff4444));
-    snareSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff3a3a3a));
-    hatSelectButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff3a3a3a));
+    kickSelectButton.setColour(juce::TextButton::buttonColourId, DrumBoxConstants::Colors::kick);
+    snareSelectButton.setColour(juce::TextButton::buttonColourId, DrumBoxConstants::Colors::buttonInactive);
+    hatSelectButton.setColour(juce::TextButton::buttonColourId, DrumBoxConstants::Colors::buttonInactive);
 
-    // Groups
-    kickGroup.setText("Kick"); addAndMakeVisible(kickGroup);
-    snareGroup.setText("Snare"); addAndMakeVisible(snareGroup);
-    hatGroup.setText("Hat"); addAndMakeVisible(hatGroup);
-
-    auto setupSlider = [this](juce::Slider& s, double min, double max, double init, auto onChange)
-    {
-        s.setRange(min, max, 0.0001);
-        s.setValue(init);
-        s.onValueChange = std::move(onChange);
-        addAndMakeVisible(s);
+    // === DRUM SELECTOR ===
+    addAndMakeVisible(drumSelector);
+    drumSelector.onDrumSelected = [this](int drum) {
+        selectedDrum = drum;
+        drumControlPanel.setSelectedDrum(drum);
+        
+        // Mettre à jour le preview avec le nouveau drum
+        if (drumWavePreview)
+            drumWavePreview->rerender();
+        
+        // Synchroniser avec les anciens boutons
+        kickSelectButton.setColour(juce::TextButton::buttonColourId, 
+            drum == 0 ? DrumBoxConstants::Colors::kick : DrumBoxConstants::Colors::buttonInactive);
+        snareSelectButton.setColour(juce::TextButton::buttonColourId, 
+            drum == 1 ? DrumBoxConstants::Colors::snare : DrumBoxConstants::Colors::buttonInactive);
+        hatSelectButton.setColour(juce::TextButton::buttonColourId, 
+            drum == 2 ? DrumBoxConstants::Colors::hat : DrumBoxConstants::Colors::buttonInactive);
     };
 
-    setupSlider(kickDecay, 0.95, 0.99995, 0.9995, [this]{
-        engine.params().kickDecay.store((float)kickDecay.getValue(), std::memory_order_relaxed);
-    });
-    setupSlider(kickAttack, 40.0, 300.0, 120.0, [this]{
-        engine.params().kickAttackFreq.store((float)kickAttack.getValue(), std::memory_order_relaxed);
-    });
-    setupSlider(kickBase, 30.0, 120.0, 55.0, [this]{
-        engine.params().kickBaseFreq.store((float)kickBase.getValue(), std::memory_order_relaxed);
-    });
+    // === DRUM CONTROL PANEL ===
+    addAndMakeVisible(drumControlViewport);
+    drumControlViewport.setViewedComponent(&drumControlPanel, false);
+    drumControlViewport.setScrollBarsShown(true, false);
+    drumControlViewport.setScrollBarThickness(10);
+    
+    drumControlPanel.onDecayChanged = [this](int lane, float value) {
+        if (lane == 0)
+            engine.params().kickDecay.store(value, std::memory_order_relaxed);
+        else if (lane == 1)
+            engine.params().snareDecay.store(value, std::memory_order_relaxed);
+        else if (lane == 2)
+            engine.params().hatDecay.store(value, std::memory_order_relaxed);
+        
+        if (drumWavePreview)
+            drumWavePreview->rerender();
+    };
+    
+    drumControlPanel.onKickAttackChanged = [this](float value) {
+        engine.params().kickAttackFreq.store(value, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    
+    drumControlPanel.onKickPitchChanged = [this](float value) {
+        engine.params().kickBaseFreq.store(value, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
 
-    setupSlider(snareDecay, 0.95, 0.99995, 0.9975, [this]{
-        engine.params().snareDecay.store((float)snareDecay.getValue(), std::memory_order_relaxed);
-    });
-    setupSlider(snareTone, 60.0, 400.0, 180.0, [this]{
-        engine.params().snareToneFreq.store((float)snareTone.getValue(), std::memory_order_relaxed);
-    });
-    setupSlider(snareNoiseMix, 0.0, 1.0, 0.75, [this]{
-        engine.params().snareNoiseMix.store((float)snareNoiseMix.getValue(), std::memory_order_relaxed);
-    });
+    drumControlPanel.onKickPitchDecayChanged = [this](float v) {
+        engine.params().kickPitchDecay.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
 
-    setupSlider(hatDecay, 0.80, 0.999, 0.96, [this]{
-        engine.params().hatDecay.store((float)hatDecay.getValue(), std::memory_order_relaxed);
-    });
-    setupSlider(hatCutoff, 1000.0, 12000.0, 7000.0, [this]{
-        engine.params().hatCutoff.store((float)hatCutoff.getValue(), std::memory_order_relaxed);
-    });
+    drumControlPanel.onKickDriveChanged = [this](float v) {
+        engine.params().kickDriveAmount.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
 
-    // Grid
-    for (int lane = 0; lane < kLanes; ++lane)
-    {
-        for (int step = 0; step < kSteps; ++step)
+    drumControlPanel.onKickDriveDecayChanged = [this](float v) {
+        engine.params().kickDriveDecay.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickClickChanged = [this](float v) {
+        engine.params().kickClickGain.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickHpChanged = [this](float v) {
+        engine.params().kickPreHpHz.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickPostGainChanged = [this](float v) {
+        engine.params().kickPostGain.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickPostHpChanged = [this](float v) {
+        engine.params().kickPostHpHz.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickPostLpChanged = [this](float v) {
+        engine.params().kickPostLpHz.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickChain1MixChanged = [this](float v) {
+        engine.params().kickChain1Mix.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickChain1DriveMulChanged = [this](float v) {
+        engine.params().kickChain1DriveMul.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickChain1LpHzChanged = [this](float v) {
+        engine.params().kickChain1LpHz.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickChain1AsymChanged = [this](float v) {
+        engine.params().kickChain1Asym.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickChain1ClipModeChanged = [this](int mode) {
+        engine.params().kickChain1ClipMode.store((float)mode, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickChain2MixChanged = [this](float v) {
+        engine.params().kickChain2Mix.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickChain2DriveMulChanged = [this](float v) {
+        engine.params().kickChain2DriveMul.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickChain2LpHzChanged = [this](float v) {
+        engine.params().kickChain2LpHz.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickChain2AsymChanged = [this](float v) {
+        engine.params().kickChain2Asym.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickChain2ClipModeChanged = [this](int mode) {
+        engine.params().kickChain2ClipMode.store((float)mode, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickTokAmountChanged = [this](float v) {
+        engine.params().kickTokAmount.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickTokHpHzChanged = [this](float v) {
+        engine.params().kickTokHpHz.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickCrunchAmountChanged = [this](float v) {
+        engine.params().kickCrunchAmount.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickTailDecayChanged = [this](float v) {
+        engine.params().kickTailDecay.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickTailMixChanged = [this](float v) {
+        engine.params().kickTailMix.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickTailFreqMulChanged = [this](float v) {
+        engine.params().kickTailFreqMul.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickSubMixChanged = [this](float v) {
+        engine.params().kickSubMix.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickSubLpHzChanged = [this](float v) {
+        engine.params().kickSubLpHz.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickFeedbackChanged = [this](float v) {
+        engine.params().kickFeedback.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    // === Kick Layers (1/2) ===
+    drumControlPanel.onKickLayer1EnabledChanged = [this](float v) {
+        engine.params().kickLayer1Enabled.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer1TypeChanged = [this](float v) {
+        engine.params().kickLayer1Type.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer1FreqHzChanged = [this](float v) {
+        engine.params().kickLayer1FreqHz.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer1Phase01Changed = [this](float v) {
+        engine.params().kickLayer1Phase01.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer1DriveChanged = [this](float v) {
+        engine.params().kickLayer1Drive.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer1AttackCoeffChanged = [this](float v) {
+        engine.params().kickLayer1AttackCoeff.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer1DecayCoeffChanged = [this](float v) {
+        engine.params().kickLayer1DecayCoeff.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer1VolChanged = [this](float v) {
+        engine.params().kickLayer1Vol.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickLayer2EnabledChanged = [this](float v) {
+        engine.params().kickLayer2Enabled.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer2TypeChanged = [this](float v) {
+        engine.params().kickLayer2Type.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer2FreqHzChanged = [this](float v) {
+        engine.params().kickLayer2FreqHz.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer2Phase01Changed = [this](float v) {
+        engine.params().kickLayer2Phase01.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer2DriveChanged = [this](float v) {
+        engine.params().kickLayer2Drive.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer2AttackCoeffChanged = [this](float v) {
+        engine.params().kickLayer2AttackCoeff.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer2DecayCoeffChanged = [this](float v) {
+        engine.params().kickLayer2DecayCoeff.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer2VolChanged = [this](float v) {
+        engine.params().kickLayer2Vol.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    // === Kick LFO ===
+    drumControlPanel.onKickLfoAmountChanged = [this](float v) {
+        engine.params().kickLfoAmount.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLfoRateHzChanged = [this](float v) {
+        engine.params().kickLfoRateHz.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLfoShapeChanged = [this](float v) {
+        engine.params().kickLfoShape.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLfoTargetChanged = [this](float v) {
+        engine.params().kickLfoTarget.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLfoPulseChanged = [this](float v) {
+        engine.params().kickLfoPulse.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    // === Kick Reverb + Quality ===
+    drumControlPanel.onKickReverbAmountChanged = [this](float v) {
+        engine.params().kickReverbAmount.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickReverbSizeChanged = [this](float v) {
+        engine.params().kickReverbSize.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickReverbToneChanged = [this](float v) {
+        engine.params().kickReverbTone.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickOversample2xChanged = [this](float v) {
+        engine.params().kickOversample2x.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickFxShiftHzChanged = [this](float v) {
+        engine.params().kickFxShiftHz.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickFxStereoChanged = [this](float v) {
+        engine.params().kickFxStereo.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickFxDiffusionChanged = [this](float v) {
+        engine.params().kickFxDiffusion.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickFxCleanDirtyChanged = [this](float v) {
+        engine.params().kickFxCleanDirty.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickFxToneChanged = [this](float v) {
+        engine.params().kickFxTone.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickFxEnvAttackCoeffChanged = [this](float v) {
+        engine.params().kickFxEnvAttackCoeff.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickFxEnvDecayCoeffChanged = [this](float v) {
+        engine.params().kickFxEnvDecayCoeff.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickFxEnvVolChanged = [this](float v) {
+        engine.params().kickFxEnvVol.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickFxDisperseChanged = [this](float v) {
+        engine.params().kickFxDisperse.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickFxOttAmountChanged = [this](float v) {
+        engine.params().kickFxOttAmount.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickFxInflatorChanged = [this](float v) {
+        engine.params().kickFxInflator.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickFxInflatorMixChanged = [this](float v) {
+        engine.params().kickFxInflatorMix.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    // === Master ===
+    drumControlPanel.onMasterEqLowDbChanged = [this](float v) {
+        engine.params().masterEqLowDb.store(v, std::memory_order_relaxed);
+        if (drumWavePreview)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onMasterEqMidDbChanged = [this](float v) {
+        engine.params().masterEqMidDb.store(v, std::memory_order_relaxed);
+        if (drumWavePreview)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onMasterEqHighDbChanged = [this](float v) {
+        engine.params().masterEqHighDb.store(v, std::memory_order_relaxed);
+        if (drumWavePreview)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onMasterClipOnChanged = [this](float v) {
+        engine.params().masterClipOn.store(v, std::memory_order_relaxed);
+        if (drumWavePreview)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onMasterClipModeChanged = [this](float v) {
+        engine.params().masterClipMode.store(v, std::memory_order_relaxed);
+        if (drumWavePreview)
+            drumWavePreview->rerender();
+    };
+
+    // === Kick layers ===
+    drumControlPanel.onKickLayer1EnabledChanged = [this](float v) {
+        engine.params().kickLayer1Enabled.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer1TypeChanged = [this](float v) {
+        engine.params().kickLayer1Type.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer1FreqHzChanged = [this](float v) {
+        engine.params().kickLayer1FreqHz.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer1Phase01Changed = [this](float v) {
+        engine.params().kickLayer1Phase01.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer1DriveChanged = [this](float v) {
+        engine.params().kickLayer1Drive.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer1AttackCoeffChanged = [this](float v) {
+        engine.params().kickLayer1AttackCoeff.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer1DecayCoeffChanged = [this](float v) {
+        engine.params().kickLayer1DecayCoeff.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer1VolChanged = [this](float v) {
+        engine.params().kickLayer1Vol.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickLayer2EnabledChanged = [this](float v) {
+        engine.params().kickLayer2Enabled.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer2TypeChanged = [this](float v) {
+        engine.params().kickLayer2Type.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer2FreqHzChanged = [this](float v) {
+        engine.params().kickLayer2FreqHz.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer2Phase01Changed = [this](float v) {
+        engine.params().kickLayer2Phase01.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer2DriveChanged = [this](float v) {
+        engine.params().kickLayer2Drive.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer2AttackCoeffChanged = [this](float v) {
+        engine.params().kickLayer2AttackCoeff.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer2DecayCoeffChanged = [this](float v) {
+        engine.params().kickLayer2DecayCoeff.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+    drumControlPanel.onKickLayer2VolChanged = [this](float v) {
+        engine.params().kickLayer2Vol.store(v, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickClipModeChanged = [this](int mode) {
+        engine.params().kickClipMode.store((float)mode, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onKickPresetSelected = [this](int presetId) {
+        // presetId: 1=Gabber, 2=Hardstyle, 3=Tribecore
+        if (presetId == 1)
         {
-            auto& b = grid[lane][step];
-            b.setButtonText("");
-            addAndMakeVisible(b);
+            engine.params().kickPostHpHz.store(28.0f, std::memory_order_relaxed);
+            engine.params().kickTailMix.store(0.65f, std::memory_order_relaxed);
+            engine.params().kickTailDecay.store(0.99935f, std::memory_order_relaxed);
+            engine.params().kickTailFreqMul.store(1.0f, std::memory_order_relaxed);
+            engine.params().kickSubMix.store(0.25f, std::memory_order_relaxed);
+            engine.params().kickSubLpHz.store(160.0f, std::memory_order_relaxed);
+            engine.params().kickFeedback.store(0.18f, std::memory_order_relaxed);
 
-            b.onClick = [this, lane, step]
-            {
-                pushToggle(lane, step, grid[lane][step].getToggleState());
-            };
+            engine.params().kickChain1Mix.store(0.45f, std::memory_order_relaxed);
+            engine.params().kickChain1DriveMul.store(1.30f, std::memory_order_relaxed);
+            engine.params().kickChain1LpHz.store(8500.0f, std::memory_order_relaxed);
+            engine.params().kickChain1Asym.store(0.05f, std::memory_order_relaxed);
+
+            engine.params().kickChain2Mix.store(0.55f, std::memory_order_relaxed);
+            engine.params().kickChain2DriveMul.store(2.20f, std::memory_order_relaxed);
+            engine.params().kickChain2LpHz.store(4200.0f, std::memory_order_relaxed);
+            engine.params().kickChain2Asym.store(0.35f, std::memory_order_relaxed);
+
+            engine.params().kickTokAmount.store(0.25f, std::memory_order_relaxed);
+            engine.params().kickTokHpHz.store(200.0f, std::memory_order_relaxed);
+            engine.params().kickCrunchAmount.store(0.35f, std::memory_order_relaxed);
         }
-    }
+        else if (presetId == 2)
+        {
+            engine.params().kickPostHpHz.store(24.0f, std::memory_order_relaxed);
+            engine.params().kickTailMix.store(0.55f, std::memory_order_relaxed);
+            engine.params().kickTailDecay.store(0.99925f, std::memory_order_relaxed);
+            engine.params().kickTailFreqMul.store(1.0f, std::memory_order_relaxed);
+            engine.params().kickSubMix.store(0.32f, std::memory_order_relaxed);
+            engine.params().kickSubLpHz.store(180.0f, std::memory_order_relaxed);
+            engine.params().kickFeedback.store(0.12f, std::memory_order_relaxed);
 
-    setSize(1100, 600);
-    startTimerHz(30);
+            engine.params().kickChain1Mix.store(0.70f, std::memory_order_relaxed);
+            engine.params().kickChain1DriveMul.store(1.20f, std::memory_order_relaxed);
+            engine.params().kickChain1LpHz.store(9000.0f, std::memory_order_relaxed);
+            engine.params().kickChain1Asym.store(0.05f, std::memory_order_relaxed);
+
+            engine.params().kickChain2Mix.store(0.30f, std::memory_order_relaxed);
+            engine.params().kickChain2DriveMul.store(1.60f, std::memory_order_relaxed);
+            engine.params().kickChain2LpHz.store(5200.0f, std::memory_order_relaxed);
+            engine.params().kickChain2Asym.store(0.20f, std::memory_order_relaxed);
+
+            engine.params().kickTokAmount.store(0.18f, std::memory_order_relaxed);
+            engine.params().kickTokHpHz.store(160.0f, std::memory_order_relaxed);
+            engine.params().kickCrunchAmount.store(0.18f, std::memory_order_relaxed);
+        }
+        else
+        {
+            engine.params().kickPostHpHz.store(35.0f, std::memory_order_relaxed);
+            engine.params().kickTailMix.store(0.40f, std::memory_order_relaxed);
+            engine.params().kickTailDecay.store(0.99910f, std::memory_order_relaxed);
+            engine.params().kickTailFreqMul.store(1.0f, std::memory_order_relaxed);
+            engine.params().kickSubMix.store(0.38f, std::memory_order_relaxed);
+            engine.params().kickSubLpHz.store(200.0f, std::memory_order_relaxed);
+            engine.params().kickFeedback.store(0.06f, std::memory_order_relaxed);
+
+            engine.params().kickChain1Mix.store(0.75f, std::memory_order_relaxed);
+            engine.params().kickChain1DriveMul.store(1.05f, std::memory_order_relaxed);
+            engine.params().kickChain1LpHz.store(10000.0f, std::memory_order_relaxed);
+            engine.params().kickChain1Asym.store(-0.05f, std::memory_order_relaxed);
+
+            engine.params().kickChain2Mix.store(0.25f, std::memory_order_relaxed);
+            engine.params().kickChain2DriveMul.store(1.30f, std::memory_order_relaxed);
+            engine.params().kickChain2LpHz.store(6500.0f, std::memory_order_relaxed);
+            engine.params().kickChain2Asym.store(0.10f, std::memory_order_relaxed);
+
+            engine.params().kickTokAmount.store(0.35f, std::memory_order_relaxed);
+            engine.params().kickTokHpHz.store(260.0f, std::memory_order_relaxed);
+            engine.params().kickCrunchAmount.store(0.10f, std::memory_order_relaxed);
+        }
+
+        if (drumWavePreview && selectedDrum == 0)
+            drumWavePreview->rerender();
+    };
+
+    drumControlPanel.onSnareToneChanged = [this](float value) {
+        engine.params().snareToneFreq.store(value, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 1)
+            drumWavePreview->rerender();
+    };
+    
+    drumControlPanel.onSnareNoiseMixChanged = [this](float value) {
+        engine.params().snareNoiseMix.store(value, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 1)
+            drumWavePreview->rerender();
+    };
+    
+    drumControlPanel.onHatCutoffChanged = [this](float value) {
+        engine.params().hatCutoff.store(value, std::memory_order_relaxed);
+        if (drumWavePreview && selectedDrum == 2)
+            drumWavePreview->rerender();
+    };
+
+    // Grid - Nouveau composant
+    addAndMakeVisible(sequencerGrid);
+    sequencerGrid.onStepToggled = [this](int lane, int step, bool state) {
+        pushToggle(lane, step, state);
+    };
+
+    // === DRUM WAVE PREVIEW ===
+    drumWavePreview = std::make_unique<DrumWavePreviewComponent>(deviceManager);
+    addAndMakeVisible(*drumWavePreview);
+    drumWavePreview->setTitle("Drum Preview");
+    drumWavePreview->setSampleRate(48000);
+    drumWavePreview->setDurationMs(400);
+    
+    // Configure le render pour le drum sélectionné
+    drumWavePreview->setRenderFn([this](juce::AudioBuffer<float>& out, int sr, int durMs) {
+        // Créer un engine temporaire pour le rendu offline
+        drumbox_core::Engine tempEngine;
+        tempEngine.prepare((double)sr, out.getNumSamples());
+        
+        // Copier les paramètres actuels (manuellement car std::atomic n'est pas copiable)
+        auto& src = engine.params();
+        auto& dst = tempEngine.params();
+        
+        dst.masterGain.store(src.masterGain.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickDecay.store(src.kickDecay.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickPitchDecay.store(src.kickPitchDecay.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickDriveDecay.store(src.kickDriveDecay.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickAttackFreq.store(src.kickAttackFreq.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickBaseFreq.store(src.kickBaseFreq.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickDriveAmount.store(src.kickDriveAmount.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickClickGain.store(src.kickClickGain.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickPreHpHz.store(src.kickPreHpHz.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickPostGain.store(src.kickPostGain.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickPostHpHz.store(src.kickPostHpHz.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickPostLpHz.store(src.kickPostLpHz.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickClipMode.store(src.kickClipMode.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+        dst.kickTailDecay.store(src.kickTailDecay.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickTailMix.store(src.kickTailMix.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickTailFreqMul.store(src.kickTailFreqMul.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickSubMix.store(src.kickSubMix.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickSubLpHz.store(src.kickSubLpHz.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickFeedback.store(src.kickFeedback.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+        dst.kickChain1Mix.store(src.kickChain1Mix.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickChain1DriveMul.store(src.kickChain1DriveMul.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickChain1LpHz.store(src.kickChain1LpHz.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickChain1Asym.store(src.kickChain1Asym.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickChain1ClipMode.store(src.kickChain1ClipMode.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+        dst.kickChain2Mix.store(src.kickChain2Mix.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickChain2DriveMul.store(src.kickChain2DriveMul.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickChain2LpHz.store(src.kickChain2LpHz.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickChain2Asym.store(src.kickChain2Asym.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickChain2ClipMode.store(src.kickChain2ClipMode.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+        dst.kickTokAmount.store(src.kickTokAmount.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickTokHpHz.store(src.kickTokHpHz.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickCrunchAmount.store(src.kickCrunchAmount.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+        // Kick layers
+        dst.kickLayer1Enabled.store(src.kickLayer1Enabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickLayer1Type.store(src.kickLayer1Type.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickLayer1FreqHz.store(src.kickLayer1FreqHz.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickLayer1Phase01.store(src.kickLayer1Phase01.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickLayer1Drive.store(src.kickLayer1Drive.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickLayer1AttackCoeff.store(src.kickLayer1AttackCoeff.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickLayer1DecayCoeff.store(src.kickLayer1DecayCoeff.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickLayer1Vol.store(src.kickLayer1Vol.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+        dst.kickLayer2Enabled.store(src.kickLayer2Enabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickLayer2Type.store(src.kickLayer2Type.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickLayer2FreqHz.store(src.kickLayer2FreqHz.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickLayer2Phase01.store(src.kickLayer2Phase01.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickLayer2Drive.store(src.kickLayer2Drive.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickLayer2AttackCoeff.store(src.kickLayer2AttackCoeff.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickLayer2DecayCoeff.store(src.kickLayer2DecayCoeff.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickLayer2Vol.store(src.kickLayer2Vol.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+        dst.kickLfoAmount.store(src.kickLfoAmount.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickLfoRateHz.store(src.kickLfoRateHz.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickLfoShape.store(src.kickLfoShape.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickLfoTarget.store(src.kickLfoTarget.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickLfoPulse.store(src.kickLfoPulse.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+        // Kick Reverb + quality
+        dst.kickReverbAmount.store(src.kickReverbAmount.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickReverbSize.store(src.kickReverbSize.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickReverbTone.store(src.kickReverbTone.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickOversample2x.store(src.kickOversample2x.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+        dst.kickFxDisperse.store(src.kickFxDisperse.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickFxInflator.store(src.kickFxInflator.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickFxInflatorMix.store(src.kickFxInflatorMix.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickFxOttAmount.store(src.kickFxOttAmount.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickFxShiftHz.store(src.kickFxShiftHz.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickFxStereo.store(src.kickFxStereo.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickFxDiffusion.store(src.kickFxDiffusion.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickFxCleanDirty.store(src.kickFxCleanDirty.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickFxTone.store(src.kickFxTone.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickFxEnvAttackCoeff.store(src.kickFxEnvAttackCoeff.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickFxEnvDecayCoeff.store(src.kickFxEnvDecayCoeff.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.kickFxEnvVol.store(src.kickFxEnvVol.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+        // Master
+        dst.masterEqLowDb.store(src.masterEqLowDb.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.masterEqMidDb.store(src.masterEqMidDb.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.masterEqHighDb.store(src.masterEqHighDb.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.masterClipOn.store(src.masterClipOn.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.masterClipMode.store(src.masterClipMode.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+        dst.snareDecay.store(src.snareDecay.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.snareToneFreq.store(src.snareToneFreq.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.snareNoiseMix.store(src.snareNoiseMix.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.hatDecay.store(src.hatDecay.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        dst.hatCutoff.store(src.hatCutoff.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        
+        // Activer le step 0 pour le drum sélectionné
+        tempEngine.setStep(selectedDrum, 0, true, 1.0f);
+        tempEngine.setPlaying(true);
+        
+        // Render le buffer
+        std::vector<float> interleaved((size_t)out.getNumSamples() * 2u);
+        tempEngine.process(interleaved.data(), out.getNumSamples(), 2);
+        
+        // Copie canal gauche vers mono
+        for (int i = 0; i < out.getNumSamples(); ++i)
+            out.setSample(0, i, interleaved[i * 2]);
+    });
+    
+    drumWavePreview->rerender();
+
+    setSize(DrumBoxConstants::Window::defaultWidth, 
+            DrumBoxConstants::Window::defaultHeight);
+    startTimerHz(DrumBoxConstants::Audio::uiRefreshRate);
 }
 
 MainComponent::~MainComponent()
@@ -161,7 +862,7 @@ MainComponent::~MainComponent()
 void MainComponent::prepareToPlay (int samplesPerBlockExpected, double sampleRate)
 {
     engine.prepare(sampleRate, samplesPerBlockExpected);
-    engine.clearPattern();
+    drumControlPanel.setSampleRate(sampleRate);
     engine.setBpm((float)bpmSlider.getValue());
     engine.setPlaying(false);
     playing.store(false);
@@ -170,7 +871,8 @@ void MainComponent::prepareToPlay (int samplesPerBlockExpected, double sampleRat
     lastPlayheadStep = -1;
     updatePlayheadOutline();
 
-    engine.params().masterGain.store((float)masterSlider.getValue(), std::memory_order_relaxed);
+    // masterSlider est en dB côté UI
+    engine.params().masterGain.store((float)std::pow(10.0, masterSlider.getValue() / 20.0), std::memory_order_relaxed);
 
     interleavedTmp.resize((size_t)samplesPerBlockExpected * 2);
 
@@ -220,12 +922,7 @@ void MainComponent::getNextAudioBlock (const juce::AudioSourceChannelInfo& info)
 
 void MainComponent::pushToggle(int lane, int step, bool on)
 {
-    Command c;
-    c.type = Command::ToggleStep;
-    c.lane = lane;
-    c.step = step;
-    c.on = on;
-    queue.push(c);
+    queue.push(Command::toggleStep(lane, step, on));
 }
 
 void MainComponent::refreshGridFromPattern()
@@ -241,11 +938,7 @@ void MainComponent::updatePlayheadOutline()
     if (step == lastPlayheadStep) return;
     lastPlayheadStep = step;
 
-    for (int lane = 0; lane < kLanes; ++lane)
-    {
-        for (int s = 0; s < kSteps; ++s)
-            grid[lane][s].setPlayhead(s == step);
-    }
+    sequencerGrid.setPlayheadPosition(step);
 }
 
 void MainComponent::timerCallback()
@@ -258,13 +951,16 @@ void MainComponent::paint (juce::Graphics& g)
 {
     // Background dégradé
     auto bounds = getLocalBounds();
-    juce::ColourGradient gradient(juce::Colour(0xff1a1a1a), 0, 0,
-                                  juce::Colour(0xff0f0f0f), 0, (float)bounds.getHeight(), false);
+    juce::ColourGradient gradient(
+        DrumBoxConstants::Colors::backgroundTop, 0, 0,
+        DrumBoxConstants::Colors::backgroundBottom, 0, (float)bounds.getHeight(), 
+        false
+    );
     g.setGradientFill(gradient);
     g.fillAll();
 
     // Titre principal
-    g.setColour(juce::Colour(0xffff6b35));
+    g.setColour(DrumBoxConstants::Colors::accent);
     g.setFont(juce::Font(24.0f, juce::Font::bold));
     g.drawText("DrumBox", 20, 12, 200, 40, juce::Justification::left);
 
@@ -272,63 +968,18 @@ void MainComponent::paint (juce::Graphics& g)
     const int step = engine.getStepIndex();
     g.setColour(juce::Colours::lightgrey);
     g.setFont(14.0f);
-    g.drawText("Step: " + juce::String(step + 1) + "/16", 20, 50, 150, 20, juce::Justification::left);
-
-    // Labels des lanes (à gauche de la grille)
-    auto area = getLocalBounds().reduced(16);
-    area.removeFromTop(75);  // Transport
-    area.removeFromBottom(10); // Marge du bas
-    
-    // On calcule où commence la grille (après les contrôles drums)
-    auto gridStartY = area.getY() + 180 + 10; // hauteur drums + marge
-    
-    const int rowH = (area.getHeight() - 190) / kLanes; // 180 pour drums + 10 marge
-    
-    g.setFont(juce::Font(16.0f, juce::Font::bold));
-    const char* laneNames[] = {"KICK", "SNARE", "HAT"};
-    const juce::Colour laneColors[] = {
-        juce::Colour(0xffff4444),  // Rouge pour Kick
-        juce::Colour(0xff44ff44),  // Vert pour Snare
-        juce::Colour(0xff4444ff)   // Bleu pour Hat
-    };
-    
-    for (int lane = 0; lane < kLanes; ++lane)
-    {
-        g.setColour(laneColors[lane]);
-        int y = gridStartY + lane * rowH;
-        g.drawText(laneNames[lane], 24, y, 80, rowH - 10, juce::Justification::centredLeft);
-        
-        // Ligne de séparation subtile
-        if (lane > 0)
-        {
-            g.setColour(juce::Colour(0xff2a2a2a));
-            g.drawLine(110.0f, (float)y, (float)(getWidth() - 20), (float)y, 1.0f);
-        }
-    }
-    
-    // Marqueurs de mesure (1, 5, 9, 13)
-    g.setColour(juce::Colour(0xff666666));
-    g.setFont(11.0f);
-    auto gridArea = getLocalBounds().reduced(16);
-    gridArea.removeFromTop(75);  // Transport
-    gridArea.removeFromTop(180); // Drums
-    gridArea.removeFromTop(10);  // Marge
-    gridArea.removeFromLeft(110);
-    const int cellW = gridArea.getWidth() / kSteps;
-    
-    for (int i = 0; i < kSteps; i += 4)
-    {
-        int x = gridArea.getX() + i * cellW + cellW / 2;
-        g.drawText(juce::String(i + 1), x - 15, gridArea.getY() - 20, 30, 15, juce::Justification::centred);
-    }
+    g.drawText("Step: " + juce::String(step + 1) + "/" + juce::String(kSteps), 
+               20, 50, 150, 20, juce::Justification::left);
 }
 
 void MainComponent::resized()
 {
-    auto area = getLocalBounds().reduced(16);
+    using namespace DrumBoxConstants::Layout;
+    
+    auto area = getLocalBounds().reduced(windowMargin);
 
     // === TOP BAR : Transport + Master ===
-    auto topBar = area.removeFromTop(75);
+    auto topBar = area.removeFromTop(transportHeight);
     topBar.removeFromLeft(200); // Espace pour le titre
     
     // Play button
@@ -346,110 +997,36 @@ void MainComponent::resized()
     masterSlider.setBounds(masterArea.reduced(4, 12));
 
     // === MILIEU : Contrôles des instruments (un seul affiché) ===
-    auto drumControls = area.removeFromTop(180);
+    auto drumControls = area.removeFromTop(drumControlHeight);
     
     // Boutons de sélection en haut de la zone de contrôle
-    auto selectorBar = drumControls.removeFromTop(45);
-    const int btnWidth = 120;
-    const int spacing = 10;
+    auto selectorBar = drumControls.removeFromTop(drumSelectorHeight);
+    drumSelector.setBounds(selectorBar);
     
-    auto selectorCenter = selectorBar.withSizeKeepingCentre(btnWidth * 3 + spacing * 2, 36);
-    kickSelectButton.setBounds(selectorCenter.removeFromLeft(btnWidth));
-    selectorCenter.removeFromLeft(spacing);
-    snareSelectButton.setBounds(selectorCenter.removeFromLeft(btnWidth));
-    selectorCenter.removeFromLeft(spacing);
-    hatSelectButton.setBounds(selectorCenter);
-    
-    // Zone de contrôle (un seul groupe visible à la fois)
+    // Zone de contrôle empilée verticalement : Preview en haut, Panneau en bas
     auto controlArea = drumControls.reduced(8, 4);
     
-    // Masquer tous les groupes et sliders sauf celui sélectionné
-    kickGroup.setVisible(selectedDrum == 0);
-    snareGroup.setVisible(selectedDrum == 1);
-    hatGroup.setVisible(selectedDrum == 2);
+    // En haut: preview waveform
+    auto previewArea = controlArea.removeFromTop(100);
+    if (drumWavePreview)
+    {
+        drumWavePreview->setBounds(previewArea);
+        DBG("DrumWavePreview bounds: " << previewArea.toString());
+    }
     
-    // Masquer tous les sliders
-    kickDecay.setVisible(false);
-    kickAttack.setVisible(false);
-    kickBase.setVisible(false);
-    snareDecay.setVisible(false);
-    snareTone.setVisible(false);
-    snareNoiseMix.setVisible(false);
-    hatDecay.setVisible(false);
-    hatCutoff.setVisible(false);
+    controlArea.removeFromTop(6); // Marge
     
-    if (selectedDrum == 0) // KICK
-    {
-        kickGroup.setBounds(controlArea);
-        auto inner = controlArea.reduced(12, 26);
-        const int sliderH = 35;
-        
-        kickDecay.setVisible(true);
-        kickDecay.setBounds(inner.removeFromTop(sliderH));
-        inner.removeFromTop(8);
-        
-        kickAttack.setVisible(true);
-        kickAttack.setBounds(inner.removeFromTop(sliderH));
-        inner.removeFromTop(8);
-        
-        kickBase.setVisible(true);
-        kickBase.setBounds(inner.removeFromTop(sliderH));
-    }
-    else if (selectedDrum == 1) // SNARE
-    {
-        snareGroup.setBounds(controlArea);
-        auto inner = controlArea.reduced(12, 26);
-        const int sliderH = 35;
-        
-        snareDecay.setVisible(true);
-        snareDecay.setBounds(inner.removeFromTop(sliderH));
-        inner.removeFromTop(8);
-        
-        snareTone.setVisible(true);
-        snareTone.setBounds(inner.removeFromTop(sliderH));
-        inner.removeFromTop(8);
-        
-        snareNoiseMix.setVisible(true);
-        snareNoiseMix.setBounds(inner.removeFromTop(sliderH));
-    }
-    else // HAT
-    {
-        hatGroup.setBounds(controlArea);
-        auto inner = controlArea.reduced(12, 26);
-        const int sliderH = 35;
-        
-        hatDecay.setVisible(true);
-        hatDecay.setBounds(inner.removeFromTop(sliderH));
-        inner.removeFromTop(8);
-        
-        hatCutoff.setVisible(true);
-        hatCutoff.setBounds(inner.removeFromTop(sliderH));
-    }
+    // En bas: panneau de contrôle (knobs)
+    drumControlViewport.setBounds(controlArea);
+
+    // Le panel contient beaucoup de contrôles (Kick). On calcule une hauteur de contenu
+    // cohérente avec le layout pour éviter le clipping et limiter le scroll.
+    const int preferredH = drumControlPanel.getPreferredHeightForWidth(controlArea.getWidth());
+    drumControlPanel.setSize(controlArea.getWidth(), std::max(controlArea.getHeight(), preferredH));
 
     // === BAS : GRILLE SÉQUENCEUR ===
     auto gridArea = area.reduced(0, 10);
-    gridArea.removeFromLeft(110); // Espace pour les labels de lanes
     
-    const int rowH = (gridArea.getHeight() - 20) / kLanes;
-    const int cellW = gridArea.getWidth() / kSteps;
-
-    for (int lane = 0; lane < kLanes; ++lane)
-    {
-        auto row = gridArea.removeFromTop(rowH);
-        
-        for (int step = 0; step < kSteps; ++step)
-        {
-            // Plus d'espace entre les cellules
-            auto cellArea = row.removeFromLeft(cellW);
-            
-            // Espacement supplémentaire tous les 4 steps (visuellement)
-            int marginLeft = (step % 4 == 0) ? 8 : 4;
-            int marginRight = (step % 4 == 3) ? 8 : 4;
-            
-            grid[lane][step].setBounds(cellArea.reduced(marginLeft, 8)
-                                              .withTrimmedRight(marginRight - marginLeft));
-        }
-        
-        gridArea.removeFromTop(10);
-    }
+    // Positionner le composant SequencerGrid
+    sequencerGrid.setBounds(gridArea);
 }
