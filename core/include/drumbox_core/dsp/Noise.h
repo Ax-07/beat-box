@@ -1,3 +1,5 @@
+// Drumbox/core/include/drumbox_core/dsp/Noise.h
+
 #pragma once
 #include "drumbox_core/Types.h"
 
